@@ -8,7 +8,7 @@ TOKEN = os.getenv("TOKEN")
 intents = discord.Intents.default()
 intents.members = True
 
-# Подключение к базе даннх
+# Подключение к базе данных
 conn = sqlite3.connect("database.db")
 cursor = conn.cursor()
 
@@ -27,6 +27,14 @@ class MyClient(discord.Client):
 
     async def setup_hook(self):
         await self.tree.sync()
+
+    async def on_ready(self):
+        activity = discord.Game(name="Detects Simulator")
+        await self.change_presence(
+            status=discord.Status.online,
+            activity=activity
+        )
+        print(f"Бот запущен как {self.user}")
 
 client = MyClient()
 
