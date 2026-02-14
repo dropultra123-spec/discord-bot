@@ -1,18 +1,69 @@
 import discord
+from discord import app_commands
 import os
 
+TOKEN = os.getenv("TOKEN")
+
 intents = discord.Intents.default()
-intents.message_content = True
+intents.members = True
 
-client = discord.Client(intents=intents)
+class MyClient(discord.Client):
+    def __init__(self):
+        super().__init__(intents=intents)
+        self.tree = app_commands.CommandTree(self)
+        self.accepted_users = []
 
-@client.event
-async def on_ready():
-    print(f'Бот запущен как {client.user}')
+    async def setup_hook(self):
+        await self.tree.sync()
 
-@client.event
-async def on_message(message):
-    if message.content == "!ping":
-        await message.channel.send("Pong!")
+client = MyClient()
 
-client.run(os.getenv("TOKEN"))
+# Проверка на администратора
+def is_admin(interaction: discord.Interaction):
+    return interaction.user.guild_permissions.administrator
+
+@client.tree.command(name="принят", description="Добавить игрока в список принятых")
+@app_commands.describe(user="Выбранный игрок")
+async def accept(interaction: discord.Interaction, user: discord.Member):
+    if not is_admin(interaction):
+        await interaction.response.send_message("❌ У вас нет прав администратора.", ephemeral=True)
+        return
+
+    try:
+        await user.send(
+            "Вы успешно прошли первый этап отбора в администрацию проекта.\n"
+            "Пожалуйста, ожидайте обзвона и дальнейших инструкций."
+        )
+    except:
+        pass
+
+    client.accepted_users.append(user)
+
+    await interaction.response.send_message(f"✅ {user.mention} добавлен в список принятых.")
+
+@client.tree.command(name="список", description="Показать список принятых")
+async def list_users(interaction: discord.Interaction):
+    if not is_admin(interaction):
+        await interaction.response.send_message("❌ У вас нет прав администратора.", ephemeral=True)
+        return
+
+    if not client.accepted_users:
+        await interaction.response.send_message("Список пуст.")
+        return
+
+    text = "📋 **Принятые:**\n"
+    for i, user in enumerate(client.accepted_users, 1):
+        text += f"{i}. {user.mention}\n"
+
+    await interaction.response.send_message(text)
+
+@client.tree.command(name="ресетсписок", description="Очистить список принятых")
+async def reset_list(interaction: discord.Interaction):
+    if not is_admin(interaction):
+        await interaction.response.send_message("❌ У вас нет прав администратора.", ephemeral=True)
+        return
+
+    client.accepted_users.clear()
+    await interaction.response.send_message("🗑 Список принятых очищен.")
+
+client.run(TOKEN)
