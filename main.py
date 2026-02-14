@@ -8,7 +8,7 @@ TOKEN = os.getenv("TOKEN")
 intents = discord.Intents.default()
 intents.members = True
 
-# Подключение к базе данных
+# Подключение к базе даннх
 conn = sqlite3.connect("database.db")
 cursor = conn.cursor()
 
