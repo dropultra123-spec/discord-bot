@@ -1,24 +1,36 @@
 import discord
 from discord import app_commands
 import os
+import sqlite3
 
 TOKEN = os.getenv("TOKEN")
 
 intents = discord.Intents.default()
 intents.members = True
 
+# Подключение к базе данных
+conn = sqlite3.connect("database.db")
+cursor = conn.cursor()
+
+# Создание таблицы если её нет
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS accepted_users (
+    user_id INTEGER PRIMARY KEY
+)
+""")
+conn.commit()
+
 class MyClient(discord.Client):
     def __init__(self):
         super().__init__(intents=intents)
         self.tree = app_commands.CommandTree(self)
-        self.accepted_users = []
 
     async def setup_hook(self):
         await self.tree.sync()
 
 client = MyClient()
 
-# Проверка на администратора
+# Проверка администратора
 def is_admin(interaction: discord.Interaction):
     return interaction.user.guild_permissions.administrator
 
@@ -30,6 +42,9 @@ async def accept(interaction: discord.Interaction, user: discord.Member):
         await interaction.response.send_message("❌ У вас нет прав администратора.", ephemeral=True)
         return
 
+    cursor.execute("INSERT OR IGNORE INTO accepted_users (user_id) VALUES (?)", (user.id,))
+    conn.commit()
+
     try:
         await user.send(
             "Вы успешно прошли первый этап отбора в администрацию проекта.\n"
@@ -38,8 +53,7 @@ async def accept(interaction: discord.Interaction, user: discord.Member):
     except:
         pass
 
-    client.accepted_users.append(user)
-    await interaction.response.send_message(f"✅ {user.mention} добавлен в список принятых.")
+    await interaction.response.send_message(f"✅ {user.mention} добавлен в список.")
 
 # Команда /список
 @client.tree.command(name="список", description="Показать список принятых")
@@ -48,34 +62,46 @@ async def list_users(interaction: discord.Interaction):
         await interaction.response.send_message("❌ У вас нет прав администратора.", ephemeral=True)
         return
 
-    if not client.accepted_users:
+    cursor.execute("SELECT user_id FROM accepted_users")
+    users = cursor.fetchall()
+
+    if not users:
         await interaction.response.send_message("Список пуст.")
         return
 
     text = "📋 **Принятые:**\n"
-    for i, user in enumerate(client.accepted_users, 1):
-        text += f"{i}. {user.mention}\n"
+    for i, (user_id,) in enumerate(users, 1):
+        member = interaction.guild.get_member(user_id)
+        if member:
+            text += f"{i}. {member.mention}\n"
+        else:
+            text += f"{i}. ID: {user_id}\n"
 
     await interaction.response.send_message(text)
 
 # Команда /ресетсписок
-@client.tree.command(name="ресетсписок", description="Очистить список принятых")
+@client.tree.command(name="ресетсписок", description="Очистить список")
 async def reset_list(interaction: discord.Interaction):
     if not is_admin(interaction):
         await interaction.response.send_message("❌ У вас нет прав администратора.", ephemeral=True)
         return
 
-    client.accepted_users.clear()
-    await interaction.response.send_message("🗑 Список принятых очищен.")
+    cursor.execute("DELETE FROM accepted_users")
+    conn.commit()
 
-# 🔥 Новая команда /обзвон
+    await interaction.response.send_message("🗑 Список очищен.")
+
+# Команда /обзвон
 @client.tree.command(name="обзвон", description="Начать обзвон кандидатов")
 async def call_users(interaction: discord.Interaction):
     if not is_admin(interaction):
         await interaction.response.send_message("❌ У вас нет прав администратора.", ephemeral=True)
         return
 
-    if not client.accepted_users:
+    cursor.execute("SELECT user_id FROM accepted_users")
+    users = cursor.fetchall()
+
+    if not users:
         await interaction.response.send_message("⚠ Список пуст.")
         return
 
@@ -85,14 +111,17 @@ async def call_users(interaction: discord.Interaction):
         "Ожидайте дальнейших инструкций."
     )
 
-    for user in client.accepted_users:
-        try:
-            await user.send(message_text)
-        except:
-            pass
+    for (user_id,) in users:
+        member = interaction.guild.get_member(user_id)
+        if member:
+            try:
+                await member.send(message_text)
+            except:
+                pass
 
-    client.accepted_users.clear()
+    cursor.execute("DELETE FROM accepted_users")
+    conn.commit()
 
-    await interaction.response.send_message("📞 Обзвон начат. Всем кандидатам отправлено уведомление. Список очищен.")
+    await interaction.response.send_message("📞 Обзвон начат. Всем отправлено сообщение. Список очищен.")
 
 client.run(TOKEN)
