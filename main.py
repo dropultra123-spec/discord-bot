@@ -30,8 +30,11 @@ class Bot(discord.Client):
         self.tree = app_commands.CommandTree(self)
 
     async def setup_hook(self):
-        await self.tree.sync()  # глобальная синхронизация
+    # Удаляем ВСЕ глобальные команды
+    self.tree.clear_commands(guild=None)
+    await self.tree.sync()
 
+    print("Старые команды очищены")
     async def on_ready(self):
         activity = discord.Game(name="Detects Simulator")
         await self.change_presence(status=discord.Status.online, activity=activity)
