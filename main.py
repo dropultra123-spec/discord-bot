@@ -30,11 +30,27 @@ class Bot(discord.Client):
         self.tree = app_commands.CommandTree(self)
 
     async def setup_hook(self):
-    # Удаляем ВСЕ глобальные команды
-    self.tree.clear_commands(guild=None)
-    await self.tree.sync()
+    print("Очистка старых команд...")
 
-    print("Старые команды очищены")
+    try:
+        # 1️⃣ Удаляем ВСЕ глобальные команды
+        self.tree.clear_commands(guild=None)
+        await self.tree.sync()
+        print("Глобальные команды очищены")
+
+        # 2️⃣ Удаляем команды во всех серверах
+        for guild in self.guilds:
+            self.tree.clear_commands(guild=guild)
+            await self.tree.sync(guild=guild)
+            print(f"Очищены команды в сервере {guild.name}")
+
+        # 3️⃣ Повторно синхронизируем только новые
+        await self.tree.sync()
+        print("Новые команды зарегистрированы")
+
+    except Exception as e:
+        print("Ошибка при очистке команд:", e)
+              
     async def on_ready(self):
         activity = discord.Game(name="Detects Simulator")
         await self.change_presence(status=discord.Status.online, activity=activity)
