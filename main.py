@@ -1,7 +1,7 @@
 import discord
 from discord import app_commands
-import os
 import sqlite3
+import os
 from datetime import timedelta
 
 TOKEN = os.getenv("TOKEN")
@@ -10,35 +10,37 @@ intents = discord.Intents.default()
 intents.members = True
 intents.guilds = True
 
+# ---------------- БАЗА ----------------
+
 conn = sqlite3.connect("database.db", check_same_thread=False)
 cursor = conn.cursor()
 
-# ---------- ТАБЛИЦЫ ----------
-cursor.execute("CREATE TABLE IF NOT EXISTS accepted_users (user_id INTEGER PRIMARY KEY)")
+cursor.execute("CREATE TABLE IF NOT EXISTS accepted (user_id INTEGER PRIMARY KEY)")
 cursor.execute("CREATE TABLE IF NOT EXISTS moderators (role_id INTEGER PRIMARY KEY)")
-cursor.execute("CREATE TABLE IF NOT EXISTS admin_points (user_id INTEGER PRIMARY KEY, points INTEGER DEFAULT 0)")
+cursor.execute("CREATE TABLE IF NOT EXISTS points (user_id INTEGER PRIMARY KEY, value INTEGER DEFAULT 0)")
 cursor.execute("CREATE TABLE IF NOT EXISTS warns (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, reason TEXT)")
-cursor.execute("CREATE TABLE IF NOT EXISTS log_channel (guild_id INTEGER PRIMARY KEY, channel_id INTEGER)")
-cursor.execute("CREATE TABLE IF NOT EXISTS global_blacklist (user_id INTEGER PRIMARY KEY, reason TEXT)")
+cursor.execute("CREATE TABLE IF NOT EXISTS blacklist (user_id INTEGER PRIMARY KEY, reason TEXT)")
 conn.commit()
 
-# ---------- КЛИЕНТ ----------
-class MyClient(discord.Client):
+# ---------------- КЛИЕНТ ----------------
+
+class Bot(discord.Client):
     def __init__(self):
         super().__init__(intents=intents)
         self.tree = app_commands.CommandTree(self)
 
     async def setup_hook(self):
-        await self.tree.sync()
+        await self.tree.sync()  # глобальная синхронизация
 
     async def on_ready(self):
         activity = discord.Game(name="Detects Simulator")
         await self.change_presence(status=discord.Status.online, activity=activity)
         print(f"Бот запущен как {self.user}")
 
-client = MyClient()
+bot = Bot()
 
-# ---------- ПРОВЕРКИ ----------
+# ---------------- ПРОВЕРКИ ----------------
+
 def is_admin(interaction):
     return interaction.user.guild_permissions.administrator
 
@@ -46,45 +48,36 @@ def is_mod(interaction):
     if is_admin(interaction):
         return True
     cursor.execute("SELECT role_id FROM moderators")
-    roles = cursor.fetchall()
-    user_roles = [r.id for r in interaction.user.roles]
-    return any(role_id[0] in user_roles for role_id in roles)
+    roles = [r[0] for r in cursor.fetchall()]
+    return any(role.id in roles for role in interaction.user.roles)
 
-def add_points(user_id, amount):
-    cursor.execute("INSERT OR IGNORE INTO admin_points (user_id, points) VALUES (?, 0)", (user_id,))
-    cursor.execute("UPDATE admin_points SET points = points + ? WHERE user_id = ?", (amount, user_id))
+def add_points(user_id, amount=1):
+    cursor.execute("INSERT OR IGNORE INTO points VALUES (?, 0)", (user_id,))
+    cursor.execute("UPDATE points SET value = value + ? WHERE user_id = ?", (amount, user_id))
     conn.commit()
 
-async def send_log(guild, text):
-    cursor.execute("SELECT channel_id FROM log_channel WHERE guild_id = ?", (guild.id,))
-    data = cursor.fetchone()
-    if data:
-        channel = guild.get_channel(data[0])
-        if channel:
-            await channel.send(text)
+# =====================================================
+# ================== СПИСОК ПРИНЯТЫХ ==================
+# =====================================================
 
-# =================================================
-# ================= СТАРЫЕ КОМАНДЫ ===============
-# =================================================
-
-@client.tree.command(name="принят")
+@bot.tree.command(name="accept", description="Добавить игрока в список принятых")
 async def accept(interaction: discord.Interaction, user: discord.Member):
     if not is_admin(interaction):
         return await interaction.response.send_message("Нет прав.", ephemeral=True)
 
-    cursor.execute("INSERT OR IGNORE INTO accepted_users VALUES (?)", (user.id,))
+    cursor.execute("INSERT OR IGNORE INTO accepted VALUES (?)", (user.id,))
     conn.commit()
 
     try:
-        await user.send("Вы успешно прошли первый этап отбора. Ожидайте дальнейших инструкций.")
+        await user.send("Вы успешно прошли первый этап отбора в администрацию проекта. Пожалуйста, ожидайте звонка и дальнейших инструкций.")
     except:
         pass
 
     await interaction.response.send_message("Игрок добавлен в список.")
 
-@client.tree.command(name="список")
+@bot.tree.command(name="list", description="Показать список принятых")
 async def list_users(interaction: discord.Interaction):
-    cursor.execute("SELECT user_id FROM accepted_users")
+    cursor.execute("SELECT user_id FROM accepted")
     data = cursor.fetchall()
 
     if not data:
@@ -97,21 +90,21 @@ async def list_users(interaction: discord.Interaction):
 
     await interaction.response.send_message(text)
 
-@client.tree.command(name="ресетсписок")
+@bot.tree.command(name="resetlist", description="Очистить список принятых")
 async def reset_list(interaction: discord.Interaction):
     if not is_admin(interaction):
         return await interaction.response.send_message("Нет прав.", ephemeral=True)
 
-    cursor.execute("DELETE FROM accepted_users")
+    cursor.execute("DELETE FROM accepted")
     conn.commit()
     await interaction.response.send_message("Список очищен.")
 
-@client.tree.command(name="обзвон")
-async def call_users(interaction: discord.Interaction):
+@bot.tree.command(name="call", description="Начать обзвон кандидатов")
+async def call(interaction: discord.Interaction):
     if not is_admin(interaction):
         return await interaction.response.send_message("Нет прав.", ephemeral=True)
 
-    cursor.execute("SELECT user_id FROM accepted_users")
+    cursor.execute("SELECT user_id FROM accepted")
     data = cursor.fetchall()
 
     if not data:
@@ -122,91 +115,107 @@ async def call_users(interaction: discord.Interaction):
         if member:
             try:
                 await member.send(
-                    "📞 Проводится обзвон. Перейдите в голосовой канал «Зал ожидания»."
+                    "В настоящее время проводится обзвон кандидатов в администрацию проекта. "
+                    "Пожалуйста, зайдите в голосовой чат и перейдите в канал «Зал ожидания». "
+                    "Ожидайте дальнейших инструкций."
                 )
             except:
                 pass
 
-    cursor.execute("DELETE FROM accepted_users")
+    cursor.execute("DELETE FROM accepted")
     conn.commit()
 
     await interaction.response.send_message("Обзвон начат. Список очищен.")
 
-# =================================================
-# ================= НОВЫЕ КОМАНДЫ ================
-# =================================================
+# =====================================================
+# ================== МОДЕРАЦИЯ ========================
+# =====================================================
 
-@client.tree.command(name="мод")
-async def set_mod(interaction: discord.Interaction, роль: discord.Role):
+@bot.tree.command(name="setmod", description="Назначить модераторскую роль")
+async def set_mod(interaction: discord.Interaction, role: discord.Role):
     if not is_admin(interaction):
         return await interaction.response.send_message("Нет прав.", ephemeral=True)
 
-    cursor.execute("INSERT OR IGNORE INTO moderators VALUES (?)", (роль.id,))
+    cursor.execute("INSERT OR IGNORE INTO moderators VALUES (?)", (role.id,))
     conn.commit()
-    await interaction.response.send_message("Роль назначена администрацией.")
+    await interaction.response.send_message("Роль добавлена как модераторская.")
 
-@client.tree.command(name="мут")
-async def mute(interaction: discord.Interaction, пользователь: discord.Member, минуты: int, причина: str):
+@bot.tree.command(name="mute", description="Выдать мут")
+async def mute(interaction: discord.Interaction, user: discord.Member, minutes: int, reason: str):
     if not is_mod(interaction):
         return await interaction.response.send_message("Нет прав.", ephemeral=True)
 
-    await пользователь.timeout(timedelta(minutes=минуты), reason=причина)
-    add_points(interaction.user.id, 1)
+    await user.timeout(timedelta(minutes=minutes), reason=reason)
+    add_points(interaction.user.id)
 
     try:
-        await пользователь.send(f"Вам выдан мут на {минуты} минут.\nПричина: {причина}")
+        await user.send(f"Вам выдан мут на {minutes} минут.\nПричина: {reason}")
     except:
         pass
 
-    await send_log(interaction.guild, f"🔇 {пользователь} мут на {минуты} мин.")
     await interaction.response.send_message("Мут выдан. +1 балл.")
 
-@client.tree.command(name="снятьмут")
-async def unmute(interaction: discord.Interaction, пользователь: discord.Member):
+@bot.tree.command(name="unmute", description="Снять мут")
+async def unmute(interaction: discord.Interaction, user: discord.Member):
     if not is_mod(interaction):
         return await interaction.response.send_message("Нет прав.", ephemeral=True)
 
-    await пользователь.timeout(None)
+    await user.timeout(None)
     await interaction.response.send_message("Мут снят.")
 
-@client.tree.command(name="варн")
-async def warn(interaction: discord.Interaction, пользователь: discord.Member, причина: str):
+@bot.tree.command(name="warn", description="Выдать варн")
+async def warn(interaction: discord.Interaction, user: discord.Member, reason: str):
     if not is_mod(interaction):
         return await interaction.response.send_message("Нет прав.", ephemeral=True)
 
-    cursor.execute("INSERT INTO warns (user_id, reason) VALUES (?, ?)", (пользователь.id, причина))
+    cursor.execute("INSERT INTO warns (user_id, reason) VALUES (?, ?)", (user.id, reason))
     conn.commit()
-    add_points(interaction.user.id, 1)
+    add_points(interaction.user.id)
 
     await interaction.response.send_message("Варн выдан. +1 балл.")
 
-@client.tree.command(name="варны")
-async def warns_list(interaction: discord.Interaction, пользователь: discord.Member):
-    cursor.execute("SELECT reason FROM warns WHERE user_id = ?", (пользователь.id,))
+@bot.tree.command(name="warns", description="Посмотреть варны пользователя")
+async def warns_list(interaction: discord.Interaction, user: discord.Member):
+    cursor.execute("SELECT reason FROM warns WHERE user_id = ?", (user.id,))
     data = cursor.fetchall()
 
     if not data:
         return await interaction.response.send_message("Варнов нет.")
 
     text = ""
-    for i, warn_reason in enumerate(data, 1):
-        text += f"{i}. {warn_reason[0]}\n"
+    for i, (reason,) in enumerate(data, 1):
+        text += f"{i}. {reason}\n"
 
     await interaction.response.send_message(text)
 
-@client.tree.command(name="таблица")
+@bot.tree.command(name="removewarn", description="Снять все варны пользователя")
+async def remove_warn(interaction: discord.Interaction, user: discord.Member):
+    if not is_mod(interaction):
+        return await interaction.response.send_message("Нет прав.", ephemeral=True)
+
+    cursor.execute("DELETE FROM warns WHERE user_id = ?", (user.id,))
+    conn.commit()
+    await interaction.response.send_message("Варны сняты.")
+
+@bot.tree.command(name="table", description="Таблица баллов администрации")
 async def table(interaction: discord.Interaction):
-    cursor.execute("SELECT user_id, points FROM admin_points ORDER BY points DESC")
+    cursor.execute("SELECT user_id, value FROM points ORDER BY value DESC")
     data = cursor.fetchall()
 
     if not data:
         return await interaction.response.send_message("Таблица пуста.")
 
     text = "📊 Таблица администрации:\n"
-    for i, (uid, points) in enumerate(data, 1):
+    for i, (uid, value) in enumerate(data, 1):
         member = interaction.guild.get_member(uid)
-        text += f"{i}. {member.mention if member else uid} — {points}\n"
+        text += f"{i}. {member.mention if member else uid} — {value}\n"
 
     await interaction.response.send_message(text)
 
-client.run(TOKEN)
+# ---------------- ОБРАБОТКА ОШИБОК ----------------
+
+@bot.event
+async def on_error(event, *args, **kwargs):
+    print("Произошла ошибка:", event)
+
+bot.run(TOKEN)
