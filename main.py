@@ -2,22 +2,21 @@ import discord
 from discord import app_commands
 import os
 import sqlite3
+from datetime import timedelta
 
 TOKEN = os.getenv("TOKEN")
 
 intents = discord.Intents.default()
 intents.members = True
 
-# Подключение к базе данных
 conn = sqlite3.connect("database.db")
 cursor = conn.cursor()
 
-# Создание таблицы если её нет
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS accepted_users (
-    user_id INTEGER PRIMARY KEY
-)
-""")
+# Таблицы
+cursor.execute("CREATE TABLE IF NOT EXISTS accepted_users (user_id INTEGER PRIMARY KEY)")
+cursor.execute("CREATE TABLE IF NOT EXISTS moderators (role_id INTEGER PRIMARY KEY)")
+cursor.execute("CREATE TABLE IF NOT EXISTS admin_points (user_id INTEGER PRIMARY KEY, points INTEGER)")
+cursor.execute("CREATE TABLE IF NOT EXISTS warns (user_id INTEGER, reason TEXT)")
 conn.commit()
 
 class MyClient(discord.Client):
@@ -30,106 +29,137 @@ class MyClient(discord.Client):
 
     async def on_ready(self):
         activity = discord.Game(name="Detects Simulator")
-        await self.change_presence(
-            status=discord.Status.online,
-            activity=activity
-        )
+        await self.change_presence(status=discord.Status.online, activity=activity)
         print(f"Бот запущен как {self.user}")
 
 client = MyClient()
 
-# Проверка администратора
-def is_admin(interaction: discord.Interaction):
+# Проверка прав
+def is_admin(interaction):
     return interaction.user.guild_permissions.administrator
 
-# Команда /принят
-@client.tree.command(name="принят", description="Добавить игрока в список принятых")
-@app_commands.describe(user="Выбранный игрок")
-async def accept(interaction: discord.Interaction, user: discord.Member):
-    if not is_admin(interaction):
-        await interaction.response.send_message("❌ У вас нет прав администратора.", ephemeral=True)
-        return
+def is_mod(interaction):
+    if is_admin(interaction):
+        return True
+    cursor.execute("SELECT role_id FROM moderators")
+    roles = cursor.fetchall()
+    user_roles = [r.id for r in interaction.user.roles]
+    return any(role_id[0] in user_roles for role_id in roles)
 
-    cursor.execute("INSERT OR IGNORE INTO accepted_users (user_id) VALUES (?)", (user.id,))
+def add_point(user_id, amount=1):
+    cursor.execute("INSERT OR IGNORE INTO admin_points (user_id, points) VALUES (?, 0)", (user_id,))
+    cursor.execute("UPDATE admin_points SET points = points + ? WHERE user_id = ?", (amount, user_id))
     conn.commit()
 
+# ---------------- МОД РОЛЬ ----------------
+@client.tree.command(name="мод", description="Назначить роль администрации")
+async def set_mod(interaction: discord.Interaction, role: discord.Role):
+    if not is_admin(interaction):
+        await interaction.response.send_message("Нет прав.", ephemeral=True)
+        return
+    cursor.execute("INSERT OR IGNORE INTO moderators (role_id) VALUES (?)", (role.id,))
+    conn.commit()
+    await interaction.response.send_message(f"Роль {role.name} теперь администрация.")
+
+# ---------------- МУТ ----------------
+@client.tree.command(name="мут", description="Выдать мут")
+async def mute(interaction: discord.Interaction, user: discord.Member, время: int, причина: str):
+    if not is_mod(interaction):
+        await interaction.response.send_message("Нет прав.", ephemeral=True)
+        return
+
+    await user.timeout(timedelta(minutes=время), reason=причина)
+    add_point(interaction.user.id, 1)
+
     try:
-        await user.send(
-            "Вы успешно прошли первый этап отбора в администрацию проекта.\n"
-            "Пожалуйста, ожидайте звонка и дальнейших инструкций."
-        )
+        await user.send(f"🔇 Вам выдан мут на {время} минут.\nПричина: {причина}\nВыдал: {interaction.user}")
     except:
         pass
 
-    await interaction.response.send_message(f"✅ {user.mention} добавлен в список.")
+    await interaction.response.send_message("Мут выдан. +1 балл")
 
-# Команда /список
-@client.tree.command(name="список", description="Показать список принятых")
-async def list_users(interaction: discord.Interaction):
-    if not is_admin(interaction):
-        await interaction.response.send_message("❌ У вас нет прав администратора.", ephemeral=True)
+# ---------------- ВАРН ----------------
+@client.tree.command(name="варн", description="Выдать варн")
+async def warn(interaction: discord.Interaction, user: discord.Member, причина: str):
+    if not is_mod(interaction):
+        await interaction.response.send_message("Нет прав.", ephemeral=True)
         return
 
-    cursor.execute("SELECT user_id FROM accepted_users")
-    users = cursor.fetchall()
+    cursor.execute("INSERT INTO warns (user_id, reason) VALUES (?, ?)", (user.id, причина))
+    conn.commit()
+    add_point(interaction.user.id, 1)
 
-    if not users:
-        await interaction.response.send_message("Список пуст.")
+    try:
+        await user.send(f"⚠ Вам выдан варн.\nПричина: {причина}\nВыдал: {interaction.user}")
+    except:
+        pass
+
+    await interaction.response.send_message("Варн выдан. +1 балл")
+
+# ---------------- ПОСМОТРЕТЬ ВАРНЫ ----------------
+@client.tree.command(name="варны", description="Посмотреть варны")
+async def warns_list(interaction: discord.Interaction, user: discord.Member):
+    cursor.execute("SELECT reason FROM warns WHERE user_id = ?", (user.id,))
+    data = cursor.fetchall()
+
+    if not data:
+        await interaction.response.send_message("Варнов нет.")
         return
 
-    text = "📋 **Принятые:**\n"
-    for i, (user_id,) in enumerate(users, 1):
-        member = interaction.guild.get_member(user_id)
-        if member:
-            text += f"{i}. {member.mention}\n"
-        else:
-            text += f"{i}. ID: {user_id}\n"
+    text = f"⚠ Варны {user.mention}:\n"
+    for i, warn_reason in enumerate(data, 1):
+        text += f"{i}. {warn_reason[0]}\n"
 
     await interaction.response.send_message(text)
 
-# Команда /ресетсписок
-@client.tree.command(name="ресетсписок", description="Очистить список")
-async def reset_list(interaction: discord.Interaction):
-    if not is_admin(interaction):
-        await interaction.response.send_message("❌ У вас нет прав администратора.", ephemeral=True)
+# ---------------- СНЯТЬ ВАРН ----------------
+@client.tree.command(name="снятьварн", description="Снять варн")
+async def remove_warn(interaction: discord.Interaction, user: discord.Member, причина: str):
+    if not is_mod(interaction):
+        await interaction.response.send_message("Нет прав.", ephemeral=True)
         return
 
-    cursor.execute("DELETE FROM accepted_users")
+    cursor.execute("DELETE FROM warns WHERE user_id = ? AND reason = ? LIMIT 1", (user.id, причина))
     conn.commit()
+    await interaction.response.send_message("Варн снят.")
 
-    await interaction.response.send_message("🗑 Список очищен.")
-
-# Команда /обзвон
-@client.tree.command(name="обзвон", description="Начать обзвон кандидатов")
-async def call_users(interaction: discord.Interaction):
+# ---------------- ВЫДАТЬ БАЛЛЫ ----------------
+@client.tree.command(name="выдача", description="Выдать баллы администрации")
+async def give_points(interaction: discord.Interaction, user: discord.Member, количество: int):
     if not is_admin(interaction):
-        await interaction.response.send_message("❌ У вас нет прав администратора.", ephemeral=True)
+        await interaction.response.send_message("Нет прав.", ephemeral=True)
         return
 
-    cursor.execute("SELECT user_id FROM accepted_users")
-    users = cursor.fetchall()
+    add_point(user.id, количество)
+    await interaction.response.send_message("Баллы выданы.")
 
-    if not users:
-        await interaction.response.send_message("⚠ Список пуст.")
+# ---------------- СНЯТЬ БАЛЛЫ ----------------
+@client.tree.command(name="снятьбаллы", description="Снять баллы")
+async def remove_points(interaction: discord.Interaction, user: discord.Member, количество: int):
+    if not is_admin(interaction):
+        await interaction.response.send_message("Нет прав.", ephemeral=True)
         return
 
-    message_text = (
-        "В настоящее время проводится обзвон кандидатов в администрацию проекта.\n"
-        "Пожалуйста, зайдите в голосовой чат и перейдите в канал «Зал ожидания».\n"
-        "Ожидайте дальнейших инструкций."
-    )
+    cursor.execute("UPDATE admin_points SET points = points - ? WHERE user_id = ?", (количество, user.id))
+    conn.commit()
+    await interaction.response.send_message("Баллы сняты.")
 
-    for (user_id,) in users:
+# ---------------- ТАБЛИЦА ----------------
+@client.tree.command(name="таблица", description="Таблица администрации")
+async def table(interaction: discord.Interaction):
+    cursor.execute("SELECT user_id, points FROM admin_points ORDER BY points DESC")
+    data = cursor.fetchall()
+
+    if not data:
+        await interaction.response.send_message("Таблица пуста.")
+        return
+
+    text = "📊 Таблица отчётов:\n"
+    for i, (user_id, points) in enumerate(data, 1):
         member = interaction.guild.get_member(user_id)
-        if member:
-            try:
-                await member.send(message_text)
-            except:
-                pass
+        name = member.mention if member else f"ID {user_id}"
+        text += f"{i}. {name} — {points} баллов\n"
 
-    cursor.execute("DELETE FROM accepted_users")
-    conn.commit()
-
-    await interaction.response.send_message("📞 Обзвон начат. Всем отправлено сообщение. Список очищен.")
+    await interaction.response.send_message(text)
 
 client.run(TOKEN)
