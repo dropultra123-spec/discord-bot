@@ -5,13 +5,12 @@ import sqlite3
 import os
 from datetime import timedelta
 
-# Токен из переменных окружения
 TOKEN = os.getenv("TOKEN")
 
 intents = discord.Intents.default()
 intents.members = True
-intents.guilds = True
 intents.message_content = True
+intents.guilds = True
 
 # ================= БАЗА ДАННЫХ =================
 
@@ -19,8 +18,6 @@ conn = sqlite3.connect("database.db", check_same_thread=False)
 cursor = conn.cursor()
 
 def init_db():
-    cursor.execute("CREATE TABLE IF NOT EXISTS accepted (user_id INTEGER PRIMARY KEY)")
-    cursor.execute("CREATE TABLE IF NOT EXISTS moderators (role_id INTEGER PRIMARY KEY)")
     cursor.execute("CREATE TABLE IF NOT EXISTS points (user_id INTEGER PRIMARY KEY, value INTEGER DEFAULT 0)")
     cursor.execute("CREATE TABLE IF NOT EXISTS warns (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, reason TEXT)")
     cursor.execute("CREATE TABLE IF NOT EXISTS blacklist (user_id INTEGER PRIMARY KEY, reason TEXT)")
@@ -31,14 +28,19 @@ init_db()
 
 def get_setting(key):
     cursor.execute("SELECT value FROM settings WHERE key = ?", (key,))
-    res = cursor.fetchone()
-    return res[0] if res else None
+    r = cursor.fetchone()
+    return r[0] if r else None
 
 def set_setting(key, value):
-    cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
+    cursor.execute("INSERT OR REPLACE INTO settings VALUES (?, ?)", (key, value))
     conn.commit()
 
-# ================= КЛИЕНТ БОТА =================
+def add_points(user_id, amount=1):
+    cursor.execute("INSERT OR IGNORE INTO points VALUES (?, 0)", (user_id,))
+    cursor.execute("UPDATE points SET value = value + ? WHERE user_id = ?", (amount, user_id))
+    conn.commit()
+
+# ================= БОТ =================
 
 class Bot(discord.Client):
     def __init__(self):
@@ -46,183 +48,162 @@ class Bot(discord.Client):
         self.tree = app_commands.CommandTree(self)
 
     async def on_ready(self):
-        try:
-            await self.tree.sync()
-            print(f"✅ Бот запущен: {self.user}")
-            if not self.check_norma_weekly.is_running():
-                self.check_norma_weekly.start()
-        except Exception as e:
-            print(f"❌ Ошибка синхронизации: {e}")
+        await self.tree.sync()
+        print(f"✅ Бот запущен: {self.user}")
+        if not self.norma_check.is_running():
+            self.norma_check.start()
 
-        activity = discord.Game(name="Admin System 2026")
-        await self.change_presence(status=discord.Status.online, activity=activity)
-
-    @tasks.loop(hours=168) # Проверка раз в неделю
-    async def check_norma_weekly(self):
+    @tasks.loop(hours=168)
+    async def norma_check(self):
         norma = get_setting("norma")
         role_id = get_setting("admin_role")
         log_id = get_setting("log_channel")
-        if not norma or not role_id: return
+        if not norma or not role_id:
+            return
 
         for guild in self.guilds:
             role = guild.get_role(role_id)
-            log_chan = guild.get_channel(log_id)
-            if not role: continue
+            log = guild.get_channel(log_id) if log_id else None
+            if not role:
+                continue
 
             for member in role.members:
                 cursor.execute("SELECT value FROM points WHERE user_id = ?", (member.id,))
-                res = cursor.fetchone()
-                points = res[0] if res else 0
+                p = cursor.fetchone()
+                p = p[0] if p else 0
+                if p < norma and log:
+                    await log.send(f"⚠️ {member.mention} не выполнил норму ({p}/{norma})")
 
-                if points < norma:
-                    if log_chan:
-                        await log_chan.send(f"⚠️ **Норма не выполнена:** {member.mention} ({points}/{norma})")
-                    try:
-                        await member.send(f"Вы не выполнили недельную норму ({points}/{norma}).")
-                    except: pass
-            
             cursor.execute("UPDATE points SET value = 0")
             conn.commit()
 
 bot = Bot()
 
-# ================= ПРОВЕРКИ И ЛОГИКА =================
+# ================= ПРОВЕРКА АДМИНА =================
 
 def is_admin(interaction: discord.Interaction):
-    return interaction.user.guild_permissions.administrator
+    role_id = get_setting("admin_role")
+    if not role_id:
+        return False
+    role = interaction.guild.get_role(role_id)
+    return role in interaction.user.roles
 
-async def send_to_logs(guild, text):
+async def log(guild, text):
     log_id = get_setting("log_channel")
     if log_id:
-        channel = guild.get_channel(log_id)
-        if channel:
-            embed = discord.Embed(description=text, color=discord.Color.orange())
-            await channel.send(embed=embed)
+        ch = guild.get_channel(log_id)
+        if ch:
+            await ch.send(embed=discord.Embed(description=text, color=discord.Color.orange()))
 
-def add_points_db(user_id, amount=1):
-    cursor.execute("INSERT OR IGNORE INTO points (user_id, value) VALUES (?, 0)", (user_id,))
-    cursor.execute("UPDATE points SET value = value + ? WHERE user_id = ?", (amount, user_id))
-    conn.commit()
+# ================= НАСТРОЙКИ =================
 
-# ================= КОМАНДЫ НАСТРОЕК =================
-
-@bot.tree.command(name="set_logs", description="Установить канал для логов")
-async def set_logs(interaction: discord.Interaction, channel: discord.TextChannel):
-    if not is_admin(interaction): return await interaction.response.send_message("❌ Нет прав.", ephemeral=True)
-    set_setting("log_channel", channel.id)
-    await interaction.response.send_message(f"✅ Логи теперь приходят в {channel.mention}")
-
-@bot.tree.command(name="set_norma", description="Установить недельную норму баллов")
-async def set_norma(interaction: discord.Interaction, amount: int):
-    if not is_admin(interaction): return await interaction.response.send_message("❌ Нет прав.", ephemeral=True)
-    set_setting("norma", amount)
-    await interaction.response.send_message(f"✅ Недельная норма установлена на `{amount}` баллов.")
-
-@bot.tree.command(name="set_admin_role", description="Установить роль администрации")
-async def set_admin_role(interaction: discord.Interaction, role: discord.Role):
-    if not is_admin(interaction): return await interaction.response.send_message("❌ Нет прав.", ephemeral=True)
+@bot.tree.command(name="setadmin")
+async def setadmin(interaction: discord.Interaction, role: discord.Role):
+    if not interaction.user.guild_permissions.administrator:
+        return await interaction.response.send_message("❌ Нет прав", ephemeral=True)
     set_setting("admin_role", role.id)
-    await interaction.response.send_message(f"✅ Роль администрации: **{role.name}**")
+    await interaction.response.send_message(f"✅ Роль администрации: {role.name}")
 
-@bot.tree.command(name="admin", description="Выдать роль администрации пользователю")
-async def admin_give(interaction: discord.Interaction, user: discord.Member):
-    if not is_admin(interaction): return await interaction.response.send_message("❌ Нет прав.", ephemeral=True)
-    role_id = get_setting("admin_role")
-    if not role_id: return await interaction.response.send_message("❌ Роль не настроена. Используйте `/set_admin_role`.")
-    role = interaction.guild.get_role(role_id)
-    await user.add_roles(role)
-    await interaction.response.send_message(f"👑 Пользователю {user.mention} выдана роль {role.name}")
+@bot.tree.command(name="set_logs")
+async def setlogs(interaction: discord.Interaction, channel: discord.TextChannel):
+    if not is_admin(interaction): return
+    set_setting("log_channel", channel.id)
+    await interaction.response.send_message("✅ Канал логов установлен")
 
-# ================= МОДЕРАЦИЯ И ЧС =================
+@bot.tree.command(name="set_norma")
+async def setnorma(interaction: discord.Interaction, amount: int):
+    if not is_admin(interaction): return
+    set_setting("norma", amount)
+    await interaction.response.send_message(f"✅ Норма: {amount}")
 
-@bot.tree.command(name="mute", description="Замутить пользователя")
+# ================= МОДЕРАЦИЯ =================
+
+@bot.tree.command(name="mute")
 async def mute(interaction: discord.Interaction, user: discord.Member, minutes: int, reason: str):
+    if not is_admin(interaction): return
     await user.timeout(timedelta(minutes=minutes), reason=reason)
-    add_points_db(interaction.user.id, 1)
-    await interaction.response.send_message(f"🔇 {user.mention} замучен. Причина: {reason}")
-    await send_to_logs(interaction.guild, f"🔇 {interaction.user.mention} замутил {user.mention} на {minutes}м.\nПричина: {reason}")
+    add_points(interaction.user.id)
+    await interaction.response.send_message("🔇 Мут выдан")
+    await log(interaction.guild, f"🔇 {interaction.user.mention} замутил {user.mention} | {reason}")
 
-@bot.tree.command(name="blacklist", description="Добавить в ЧС")
-async def blacklist_add(interaction: discord.Interaction, user: discord.Member, reason: str):
-    if not is_admin(interaction): return await interaction.response.send_message("❌ Нет прав.", ephemeral=True)
-    cursor.execute("INSERT OR REPLACE INTO blacklist VALUES (?, ?)", (user.id, reason))
+@bot.tree.command(name="unmute")
+async def unmute(interaction: discord.Interaction, user: discord.Member):
+    if not is_admin(interaction): return
+    await user.timeout(None)
+    add_points(interaction.user.id)
+    await interaction.response.send_message("🔊 Мут снят")
+
+@bot.tree.command(name="warn")
+async def warn(interaction: discord.Interaction, user: discord.Member, reason: str):
+    if not is_admin(interaction): return
+    cursor.execute("INSERT INTO warns (user_id, reason) VALUES (?, ?)", (user.id, reason))
     conn.commit()
-    await interaction.response.send_message(f"🚫 {user.mention} в ЧС. Причина: {reason}")
-    await send_to_logs(interaction.guild, f"🚫 {interaction.user.mention} добавил {user.mention} в ЧС.\nПричина: {reason}")
+    add_points(interaction.user.id)
+    await interaction.response.send_message("⚠️ Варн выдан")
 
-@bot.tree.command(name="unblacklist", description="Удалить из ЧС")
-async def unblacklist(interaction: discord.Interaction, user: discord.Member):
-    if not is_admin(interaction): return await interaction.response.send_message("❌ Нет прав.", ephemeral=True)
-    cursor.execute("DELETE FROM blacklist WHERE user_id = ?", (user.id,))
+@bot.tree.command(name="unwarn")
+async def unwarn(interaction: discord.Interaction, user: discord.Member, reason: str):
+    if not is_admin(interaction): return
+    cursor.execute("DELETE FROM warns WHERE user_id = ? AND reason = ?", (user.id, reason))
     conn.commit()
-    await interaction.response.send_message(f"✅ {user.mention} удален из ЧС.")
+    add_points(interaction.user.id)
+    await interaction.response.send_message("✅ Варн снят")
 
-# ================= ТАБЛИЦА =================
+@bot.tree.command(name="warns")
+async def warns(interaction: discord.Interaction, user: discord.Member):
+    cursor.execute("SELECT reason FROM warns WHERE user_id = ?", (user.id,))
+    data = cursor.fetchall()
+    text = "\n".join([f"• {r[0]}" for r in data]) if data else "Нет варнов"
+    await interaction.response.send_message(f"⚠️ Варны {user.mention}:\n{text}")
 
-@bot.tree.command(name="table", description="Таблица баллов и нормы")
+@bot.tree.command(name="ban")
+async def ban(interaction: discord.Interaction, user: discord.Member, reason: str):
+    if not is_admin(interaction): return
+    await user.ban(reason=reason)
+    add_points(interaction.user.id)
+    await interaction.response.send_message("🔨 Бан выдан")
+
+@bot.tree.command(name="unban")
+async def unban(interaction: discord.Interaction, user_id: int):
+    if not is_admin(interaction): return
+    user = await bot.fetch_user(user_id)
+    await interaction.guild.unban(user)
+    add_points(interaction.user.id)
+    await interaction.response.send_message("♻️ Бан снят")
+
+# ================= ПРОЧЕЕ =================
+
+@bot.tree.command(name="points")
+async def points(interaction: discord.Interaction, user: discord.Member, action: str, amount: int):
+    if not is_admin(interaction): return
+    if action == "выдать":
+        add_points(user.id, amount)
+    elif action == "снять":
+        add_points(user.id, -amount)
+    await interaction.response.send_message("⭐ Баллы обновлены")
+
+@bot.tree.command(name="profile")
+async def profile(interaction: discord.Interaction, user: discord.Member):
+    cursor.execute("SELECT value FROM points WHERE user_id = ?", (user.id,))
+    p = cursor.fetchone()
+    p = p[0] if p else 0
+    await interaction.response.send_message(f"👤 Профиль {user.mention}\n⭐ Баллы: {p}")
+
+@bot.tree.command(name="table")
 async def table(interaction: discord.Interaction):
     role_id = get_setting("admin_role")
     norma = get_setting("norma") or 0
-    if not role_id: return await interaction.response.send_message("❌ Роль администрации не настроена.")
-
     role = interaction.guild.get_role(role_id)
-    embed = discord.Embed(title="📊 Статистика Администрации", color=discord.Color.blue())
-    
-    desc = ""
-    for member in role.members:
-        cursor.execute("SELECT value FROM points WHERE user_id = ?", (member.id,))
-        res = cursor.fetchone()
-        p = res[0] if res else 0
-        status = "✅" if p >= norma else "❌"
-        desc += f"{status} {member.mention} — `{p}/{norma}` баллов\n"
-    
-    embed.description = desc if desc else "В данной роли никого нет."
-    await interaction.response.send_message(embed=embed)
+    if not role:
+        return
 
-# ================= ВСЕ ОСТАЛЬНЫЕ СТАРЫЕ КОМАНДЫ =================
+    text = ""
+    for m in role.members:
+        cursor.execute("SELECT value FROM points WHERE user_id = ?", (m.id,))
+        p = cursor.fetchone()
+        p = p[0] if p else 0
+        text += f"{m.mention} — {p}/{norma}\n"
 
-@bot.tree.command(name="accept", description="Принять кандидата")
-async def accept(interaction: discord.Interaction, user: discord.Member):
-    if not is_admin(interaction): return await interaction.response.send_message("❌")
-    cursor.execute("INSERT OR IGNORE INTO accepted VALUES (?)", (user.id,))
-    conn.commit()
-    try: await user.send("📩 Вы приняты на этап обзвона.")
-    except: pass
-    await interaction.response.send_message(f"✅ {user.display_name} в списке.")
-
-@bot.tree.command(name="list", description="Список кандидатов")
-async def list_cands(interaction: discord.Interaction):
-    cursor.execute("SELECT user_id FROM accepted")
-    data = cursor.fetchall()
-    text = "\n".join([f"<@{u[0]}>" for u in data]) if data else "Пусто"
-    await interaction.response.send_message(f"📋 Кандидаты:\n{text}")
-
-@bot.tree.command(name="call", description="Обзвон")
-async def call_cands(interaction: discord.Interaction):
-    if not is_admin(interaction): return
-    cursor.execute("SELECT user_id FROM accepted")
-    data = cursor.fetchall()
-    for (uid,) in data:
-        m = interaction.guild.get_member(uid)
-        if m: 
-            try: await m.send("📞 Зайдите в канал «Зал ожидания».")
-            except: pass
-    cursor.execute("DELETE FROM accepted")
-    conn.commit()
-    await interaction.response.send_message("📢 Рассылка завершена.")
-
-@bot.tree.command(name="warn", description="Выдать варн")
-async def warn(interaction: discord.Interaction, user: discord.Member, reason: str):
-    cursor.execute("INSERT INTO warns (user_id, reason) VALUES (?, ?)", (user.id, reason))
-    conn.commit()
-    add_points_db(interaction.user.id, 1)
-    await interaction.response.send_message(f"⚠️ Варн {user.mention}. Причина: {reason}")
-
-@bot.tree.command(name="addpoints", description="Выдать баллы")
-async def addp(interaction: discord.Interaction, user: discord.Member, amount: int):
-    if not is_admin(interaction): return
-    add_points_db(user.id, amount)
-    await interaction.response.send_message(f"⭐ {user.mention} +{amount} баллов.")
+    await interaction.response.send_message(embed=discord.Embed(title="📊 Таблица", description=text))
 
 bot.run(TOKEN)
-
